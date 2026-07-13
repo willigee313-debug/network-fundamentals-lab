@@ -1,0 +1,62 @@
+# 09장 - conntrack / 포트 & idle timeout 실습 토폴로지
+#
+#   cli ──── nat ──── srv(:7777 echo 서버)
+#  10.9.1.10    10.9.2.10
+#
+# ★ 장전된 고장 2종 (nat):
+#   고장1: established idle timeout = 30초  → 30초 놀던 연결이 "조용히" 죽는다
+#   고장2: SNAT 포트 범위 = 30000-30001 (2개) → 동시 연결 3개째부터 "신규만" 실패
+#
+# 보조 설정 (실무 방화벽 모사):
+#   - INVALID 상태 패킷 DROP (상태 없는 패킷은 통과 금지)
+#   - nf_conntrack_tcp_loose=0 (mid-stream pickup 금지 = 엄격 모드)
+
+name: 09-conntrack
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    cli:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.9.1.10/24 dev eth1
+        - ip route add default via 10.9.1.1
+
+    nat:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.9.1.1/24 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.9.2.1/24 dev eth2
+        # ★ 고장2: TCP SNAT 포트를 딱 2개만 (30000-30001)
+        - iptables -t nat -A POSTROUTING -o eth2 -p tcp -j SNAT --to-source 10.9.2.1:30000-30001
+        - iptables -t nat -A POSTROUTING -o eth2 -j MASQUERADE
+        # 실무 방화벽 모사: 상태 없는(INVALID) 패킷은 버린다
+        - iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP
+        - sysctl -w net.netfilter.nf_conntrack_tcp_loose=0
+        # ★ 고장1: established idle timeout 30초 (기본 5일 → 30초)
+        - sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=30
+
+    srv:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.9.2.10/24 dev eth1
+        - ip route add default via 10.9.2.1
+        - 'bash -c "nohup socat TCP-LISTEN:7777,fork,reuseaddr SYSTEM:cat >/dev/null 2>&1 &"'   # echo 서버
+
+  links:
+    - endpoints: ["cli:eth1", "nat:eth1"]
+    - endpoints: ["nat:eth2", "srv:eth1"]

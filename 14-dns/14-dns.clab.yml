@@ -1,0 +1,98 @@
+# 14장 - DNS 기본 (해석 순서 · 캐시/TTL · 다중 A) 실습 토폴로지
+#
+#   cli(.10) ─┐
+#   cache(.53)─┤                        cli → cache(리졸버, 캐시) → auth(권한 서버)
+#   auth(.54) ─┼─ sw ── 전부 10.14.0.0/24
+#   srv1(.101)─┤                        app.lab   A .101 (TTL 3600)  ← srv1은 죽어 있다!
+#   srv2(.102)─┘                        multi.lab A .101 + .102      ← 다중 A (절반이 죽음)
+#
+# ★ 고장이 기본값:
+#   ① app.lab이 가리키는 srv1(.101)이 침묵(80 포트 drop) → 서비스 장애 중
+#      "장애 조치"(auth 레코드를 .102로 변경)를 해도 cache의 TTL 3600 캐시가 옛 주소를
+#      계속 답한다 → "고쳤는데도 안 됨"  (실습 B)
+#   ② multi.lab의 A 레코드 절반이 죽은 주소 → 접속이 느리거나 간헐 실패  (실습 C)
+#
+# 구성 노트: netshoot에는 dnsmasq가 없어 배포 시 apk로 설치한다(인터넷 필요).
+#   설치는 mgmt 기본 경로가 살아있는 exec 앞부분에서 수행.
+
+name: 14-dns
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    sw:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link add br0 type bridge
+        - ip link set br0 up
+        - ip link set eth1 up
+        - ip link set eth1 master br0
+        - ip link set eth2 up
+        - ip link set eth2 master br0
+        - ip link set eth3 up
+        - ip link set eth3 master br0
+        - ip link set eth4 up
+        - ip link set eth4 master br0
+        - ip link set eth5 up
+        - ip link set eth5 master br0
+
+    cli:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.14.0.10/24 dev eth1
+        - 'bash -c "echo nameserver 10.14.0.53 > /etc/resolv.conf"'   # 리졸버 = cache
+
+    cache:                     # 사내 리졸버 역할 (캐시 보유)
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - apk add --no-cache dnsmasq                                  # mgmt 인터넷으로 설치
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.14.0.53/24 dev eth1
+        - 'bash -c "dnsmasq --no-resolv --no-hosts --server=10.14.0.54 --cache-size=1000 --listen-address=10.14.0.53 --bind-interfaces"'
+
+    auth:                      # 권한(authoritative) 서버 역할
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - apk add --no-cache dnsmasq
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.14.0.54/24 dev eth1
+        - 'bash -c "dnsmasq --no-resolv --no-hosts --local-ttl=3600 --host-record=app.lab,10.14.0.101 --host-record=multi.lab,10.14.0.101 --host-record=multi.lab,10.14.0.102 --listen-address=10.14.0.54 --bind-interfaces"'
+
+    srv1:                      # app.lab의 현재 타깃 — 죽어 있다 (80 침묵)
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.14.0.101/24 dev eth1
+        - nft add table ip dead
+        - 'nft add chain ip dead input { type filter hook input priority 0 ; }'
+        - nft add rule ip dead input tcp dport 80 drop                # 죽은 서버 모사(침묵)
+
+    srv2:                      # 살아있는 서버
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.14.0.102/24 dev eth1
+        - 'bash -c "cd /tmp && echo pong-from-srv2 > index.html && nohup python3 -m http.server 80 >/dev/null 2>&1 &"'
+
+  links:
+    - endpoints: ["cli:eth1", "sw:eth1"]
+    - endpoints: ["cache:eth1", "sw:eth2"]
+    - endpoints: ["auth:eth1", "sw:eth3"]
+    - endpoints: ["srv1:eth1", "sw:eth4"]
+    - endpoints: ["srv2:eth1", "sw:eth5"]

@@ -1,0 +1,70 @@
+# 16장 - NAT 심화: 헤어핀 실습 토폴로지
+#
+#   cli(.10) ─┐
+#   srv(.20) ─┼─ sw ── nat(내부 .1 / "공인" 10.16.99.1)
+#             │        └ DNAT: 10.16.99.1:8080 → srv:80 (포트 공개, 장전됨)
+#   내부망 10.16.1.0/24
+#
+# ★ 고장이 기본값: 내부(cli)가 "공인 IP"로 접속하는 헤어핀 경로에 SNAT가 없다.
+#   → DNAT는 되지만 srv가 cli의 사설 소스를 보고 "같은 L2로 직접" 응답
+#   → cli는 접속한 적 없는 주소(srv 실주소)에서 온 SYN-ACK를 버림 → 타임아웃.
+#   (11장 대칭성 원리의 변주 — 이번엔 리턴이 NAT를 "건너뛰어서" 문제)
+#   수정(한 줄): 헤어핀 구간만 MASQUERADE (fix.sh)
+
+name: 16-nat-hairpin
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    sw:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link add br0 type bridge
+        - ip link set br0 up
+        - ip link set eth1 up
+        - ip link set eth1 master br0
+        - ip link set eth2 up
+        - ip link set eth2 master br0
+        - ip link set eth3 up
+        - ip link set eth3 master br0
+
+    cli:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.16.1.10/24 dev eth1
+        - ip route add default via 10.16.1.1
+
+    srv:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.16.1.20/24 dev eth1
+        - ip route add default via 10.16.1.1
+        - 'bash -c "cd /tmp && echo pong-hairpin > index.html && nohup python3 -m http.server 80 >/dev/null 2>&1 &"'
+
+    nat:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.16.1.1/24 dev eth1
+        - ip addr add 10.16.99.1/32 dev lo          # "공인 IP" 모사
+        # 포트 공개(DNAT)는 장전됨 — ★ 헤어핀 SNAT는 없음 (고장)
+        - iptables -t nat -A PREROUTING -d 10.16.99.1 -p tcp --dport 8080 -j DNAT --to-destination 10.16.1.20:80
+
+  links:
+    - endpoints: ["cli:eth1", "sw:eth1"]
+    - endpoints: ["srv:eth1", "sw:eth2"]
+    - endpoints: ["nat:eth1", "sw:eth3"]

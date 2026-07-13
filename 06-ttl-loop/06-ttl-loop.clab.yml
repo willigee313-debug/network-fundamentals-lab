@@ -1,0 +1,53 @@
+# 06장 - TTL & 라우팅 루프 실습 토폴로지
+#
+#   h1 ──── r1 ⇄ r2        r1과 r2가 서로를 default로 가리킨다(고장)
+#  10.6.1.10   10.6.0.0/30
+#
+# ★ 고장이 기본값: h1이 "모르는 목적지"(예: 198.51.100.1)로 보내면
+#   r1 → r2 → r1 → r2 ... 패킷이 두 라우터 사이를 무한 왕복 — TTL이 0이 될 때까지.
+#   수정(한 줄): docker exec clab-06-ttl-loop-r2 ip route replace unreachable default
+#   ("모르는 목적지는 루프가 아니라 명시적으로 버려라")
+
+name: 06-ttl-loop
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    h1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.6.1.10/24 dev eth1
+        - ip route add default via 10.6.1.1
+
+    r1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.6.1.1/24 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.6.0.1/30 dev eth2
+        - ip route add default via 10.6.0.2          # ★ 모르는 건 전부 r2로
+
+    r2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.6.0.2/30 dev eth1
+        - ip route add 10.6.1.0/24 via 10.6.0.1
+        - ip route add default via 10.6.0.1          # ★ 고장: 모르는 건 전부 r1로 (상호 디폴트!)
+
+  links:
+    - endpoints: ["h1:eth1", "r1:eth1"]
+    - endpoints: ["r1:eth2", "r2:eth1"]

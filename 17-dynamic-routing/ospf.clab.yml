@@ -1,0 +1,66 @@
+# 17장a - 동적 라우팅: OSPF (FRR) — "인접이 왜 안 맺어지지?"
+#
+#   h1 ──── r1(FRR) ──── r2(FRR) ──── h2
+#  10.17.1.10   10.17.0.0/30    10.17.2.10
+#
+# ★ 고장이 기본값: r2의 OSPF가 전부 area 1 (r1은 area 0) — hello의 area 불일치로
+#   인접(adjacency)이 영원히 안 맺어진다. 라우트 교환 0.
+#   수정: r2를 area 0으로 (fix.sh — vtysh 설정)
+#
+# 노트: FRR 공식 이미지는 amd64뿐 → Apple Silicon에선 qemu 에뮬레이션(느릴 수 있음).
+
+name: 17-ospf
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    h1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.17.1.10/24 dev eth1
+        - ip route add default via 10.17.1.1
+
+    r1:
+      kind: linux
+      image: frrouting/frr:latest
+      exec:
+        - 'sh -c "ip route del default 2>/dev/null || true"'
+        - 'sh -c "echo 1 > /proc/sys/net/ipv4/ip_forward"'
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - 'sh -c "sleep 3 && /usr/lib/frr/ospfd -d"'
+        # NBMA(유니캐스트 hello): 이 랩 환경(에뮬레이션+veth)에서 OSPF 멀티캐스트가 전달되지
+        # 않아 non-broadcast + neighbor 지정으로 구성. hello/dead 단축은 수렴 가속용.
+        - vtysh -c "conf t" -c "interface eth1" -c "ip address 10.17.1.1/24" -c "exit" -c "interface eth2" -c "ip address 10.17.0.1/30" -c "ip ospf network non-broadcast" -c "ip ospf hello-interval 2" -c "ip ospf dead-interval 8" -c "exit" -c "router ospf" -c "network 10.17.1.0/24 area 0" -c "network 10.17.0.0/30 area 0" -c "neighbor 10.17.0.2 poll-interval 5"
+
+    r2:
+      kind: linux
+      image: frrouting/frr:latest
+      exec:
+        - 'sh -c "ip route del default 2>/dev/null || true"'
+        - 'sh -c "echo 1 > /proc/sys/net/ipv4/ip_forward"'
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - 'sh -c "sleep 3 && /usr/lib/frr/ospfd -d"'
+        # ★ 고장: 전부 area 1 (r1과 불일치)
+        - vtysh -c "conf t" -c "interface eth1" -c "ip address 10.17.0.2/30" -c "ip ospf network non-broadcast" -c "ip ospf hello-interval 2" -c "ip ospf dead-interval 8" -c "exit" -c "interface eth2" -c "ip address 10.17.2.1/24" -c "exit" -c "router ospf" -c "network 10.17.0.0/30 area 1" -c "network 10.17.2.0/24 area 1" -c "neighbor 10.17.0.1 poll-interval 5"
+
+    h2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.17.2.10/24 dev eth1
+        - ip route add default via 10.17.2.1
+
+  links:
+    - endpoints: ["h1:eth1", "r1:eth1"]
+    - endpoints: ["r1:eth2", "r2:eth1"]
+    - endpoints: ["r2:eth2", "h2:eth1"]

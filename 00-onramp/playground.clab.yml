@@ -1,0 +1,31 @@
+# 00장 - 온램프 연습장 (시리즈 유일의 "고장 없는" 랩)
+#
+#   h1 ────────── h2        # 스위치도 없이 케이블 직결. 도구 연습용.
+#  10.0.0.1     10.0.0.2
+
+name: 00-onramp
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    h1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.0.0.1/24 dev eth1
+
+    h2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.0.0.2/24 dev eth1
+
+  links:
+    - endpoints: ["h1:eth1", "h2:eth1"]

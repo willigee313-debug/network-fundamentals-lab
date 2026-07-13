@@ -1,0 +1,98 @@
+# 03장 - VLAN / 트렁크 실습 토폴로지
+#
+#   h1(VLAN10) ── sw1 ══trunk══ sw2 ── h2(VLAN10)
+#                                 └─── h3(VLAN20)
+#   h1/h2/h3 전부 10.3.10.0/24 — "같은 서브넷"! 그러나 VLAN이 세계를 가른다.
+#
+# ★ 고장이 기본값: sw2의 트렁크 포트(eth2)에 VLAN 10 태그 허용이 누락.
+#   → 같은 VLAN 10의 h1↔h2가 스위치를 넘는 순간 단절 (태그된 프레임이 문전박대).
+#   수정(한 줄): docker exec clab-03-vlan-trunk-sw2 bridge vlan add dev eth2 vid 10
+
+name: 03-vlan-trunk
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    sw1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        - ip link add br0 type bridge
+        - ip link set br0 type bridge vlan_filtering 1
+        - ip link set br0 up
+        # h1 액세스 포트 (VLAN 10)
+        - ip link set eth1 up
+        - ip link set eth1 master br0
+        - bridge vlan add dev eth1 vid 10 pvid untagged
+        - bridge vlan del dev eth1 vid 1
+        # 트렁크 (VLAN 10, 20 태그 허용) — sw1 쪽은 올바름
+        - ip link set eth2 up
+        - ip link set eth2 master br0
+        - bridge vlan add dev eth2 vid 10
+        - bridge vlan add dev eth2 vid 20
+        - bridge vlan del dev eth2 vid 1
+
+    sw2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        - ip link add br0 type bridge
+        - ip link set br0 type bridge vlan_filtering 1
+        - ip link set br0 up
+        # h2 액세스 포트 (VLAN 10)
+        - ip link set eth1 up
+        - ip link set eth1 master br0
+        - bridge vlan add dev eth1 vid 10 pvid untagged
+        - bridge vlan del dev eth1 vid 1
+        # 트렁크 — ★ 고장: vid 10 누락! (vid 20만 허용)
+        - ip link set eth2 up
+        - ip link set eth2 master br0
+        - bridge vlan add dev eth2 vid 20
+        - bridge vlan del dev eth2 vid 1
+        # h3 액세스 포트 (VLAN 20)
+        - ip link set eth3 up
+        - ip link set eth3 master br0
+        - bridge vlan add dev eth3 vid 20 pvid untagged
+        - bridge vlan del dev eth3 vid 1
+
+    h1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - ip link set eth1 up
+        - ip addr add 10.3.10.1/24 dev eth1
+
+    h2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - ip link set eth1 up
+        - ip addr add 10.3.10.2/24 dev eth1
+
+    h3:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - ip link set eth1 up
+        - ip addr add 10.3.10.3/24 dev eth1     # 같은 서브넷이지만 VLAN 20!
+
+  links:
+    - endpoints: ["h1:eth1", "sw1:eth1"]
+    - endpoints: ["sw1:eth2", "sw2:eth2"]     # 트렁크
+    - endpoints: ["h2:eth1", "sw2:eth1"]
+    - endpoints: ["h3:eth1", "sw2:eth3"]

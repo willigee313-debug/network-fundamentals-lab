@@ -1,0 +1,59 @@
+# 08장 - TCP 3-way 실패 유형 구분 실습 토폴로지
+#
+#   cli ──── fw ──── srv
+#  10.8.1.10   10.8.2.10
+#
+# ★ 같은 서버, 4개 포트 = 4개 증상 (전부 배포 시 장전):
+#   :6060  정상 (socat 리스너)                     → 성공 (baseline)
+#   :8080  fw가 SYN을 DROP                        → 타임아웃
+#   :9090  fw 통과, srv에 리스너 없음               → Connection refused (srv가 RST)
+#   :7070  fw가 REJECT with tcp-reset             → refused처럼 보이지만 RST 발신자가 다름
+#
+# 수정: fix.sh (포트별 해제) — 이 장의 목적은 수정보다 "증상 지문 분류"
+
+name: 08-tcp-3way
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    cli:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.8.1.10/24 dev eth1
+        - ip route add default via 10.8.1.1
+
+    fw:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.8.1.1/24 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.8.2.1/24 dev eth2
+        - nft add table ip fw
+        - 'nft add chain ip fw forward { type filter hook forward priority 0 ; }'
+        - nft add rule ip fw forward tcp dport 8080 drop                       # 고장1: 조용히 폐기
+        - 'nft add rule ip fw forward tcp dport 7070 reject with tcp reset'    # 고장2: 중간자 RST
+
+    srv:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.8.2.10/24 dev eth1
+        - ip route add default via 10.8.2.1
+        - 'bash -c "nohup socat TCP-LISTEN:6060,fork,reuseaddr SYSTEM:\"echo pong\" >/dev/null 2>&1 &"'
+        # :9090은 의도적으로 리스너 없음 (고장3: refused)
+
+  links:
+    - endpoints: ["cli:eth1", "fw:eth1"]
+    - endpoints: ["fw:eth2", "srv:eth1"]

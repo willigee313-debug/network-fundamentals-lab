@@ -1,0 +1,65 @@
+# 17장b - 동적 라우팅: BGP (FRR) — "세션은 Established인데 라우트가 없다"
+#
+#   h1 ──── r1(AS 65001) ──── r2(AS 65002) ──── h2
+#  10.17.1.10     10.17.0.0/30 (eBGP)      10.17.2.10
+#
+# ★ 고장이 기본값: r1에 network 문 누락 — 세션은 정상(Established)인데
+#   r1이 자기 대역(10.17.1.0/24)을 광고하지 않는다 → r2는 리턴 라우트가 없음(04장의 재림!)
+#   수정(vtysh 한 줄): router bgp 65001 → address-family ipv4 → network 10.17.1.0/24
+#
+# 노트: FRR eBGP는 기본이 RFC8212(정책 없으면 광고 안 함) → 실습 단순화를 위해
+#       양쪽에 no bgp ebgp-requires-policy 를 넣는다.
+
+name: 17-bgp
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    h1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.17.1.10/24 dev eth1
+        - ip route add default via 10.17.1.1
+
+    r1:
+      kind: linux
+      image: frrouting/frr:latest
+      exec:
+        - 'sh -c "ip route del default 2>/dev/null || true"'
+        - 'sh -c "echo 1 > /proc/sys/net/ipv4/ip_forward"'
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - 'sh -c "sleep 3 && /usr/lib/frr/bgpd -d"'
+        # ★ 고장: network 10.17.1.0/24 문이 없다! (세션은 맺되 광고할 게 없음)
+        - vtysh -c "conf t" -c "interface eth1" -c "ip address 10.17.1.1/24" -c "exit" -c "interface eth2" -c "ip address 10.17.0.1/30" -c "exit" -c "router bgp 65001" -c "no bgp ebgp-requires-policy" -c "neighbor 10.17.0.2 remote-as 65002"
+
+    r2:
+      kind: linux
+      image: frrouting/frr:latest
+      exec:
+        - 'sh -c "ip route del default 2>/dev/null || true"'
+        - 'sh -c "echo 1 > /proc/sys/net/ipv4/ip_forward"'
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - 'sh -c "sleep 3 && /usr/lib/frr/bgpd -d"'
+        - vtysh -c "conf t" -c "interface eth1" -c "ip address 10.17.0.2/30" -c "exit" -c "interface eth2" -c "ip address 10.17.2.1/24" -c "exit" -c "router bgp 65002" -c "no bgp ebgp-requires-policy" -c "neighbor 10.17.0.1 remote-as 65001" -c "address-family ipv4 unicast" -c "network 10.17.2.0/24"
+
+    h2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.17.2.10/24 dev eth1
+        - ip route add default via 10.17.2.1
+
+  links:
+    - endpoints: ["h1:eth1", "r1:eth1"]
+    - endpoints: ["r1:eth2", "r2:eth1"]
+    - endpoints: ["r2:eth2", "h2:eth1"]

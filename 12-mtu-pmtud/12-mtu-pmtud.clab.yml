@@ -1,0 +1,89 @@
+# 12장 - MTU / MSS / PMTUD & ICMP frag-needed 실습 토폴로지
+#
+#   h1 ──1500── r1 ──[1400]── r2 ──1500── h2(iperf3 서버)
+#  10.12.1.10                              10.12.2.10
+#
+# 링크 MTU를 명시한다 (clab 기본은 9500!) — 중간 구간만 1400으로 좁힌 "저 MTU 구간".
+#
+# ★ 고장이 기본값: r1이 자신이 만드는 ICMP frag-needed(type3/code4)를 밖으로 못 내보낸다.
+#   → 큰 DF 패킷이 r1에서 죽는데 발신자는 그 사실을 통보받지 못한다 = PMTUD 블랙홀.
+#   증상: 작은 패킷은 되고, 큰 전송(TLS/파일)만 조용히 멎는다.
+#   수정(한 줄): docker exec clab-12-mtu-pmtud-r1 nft flush chain ip fw output
+
+name: 12-mtu-pmtud
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    h1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.12.1.10/24 dev eth1
+        - ip route add default via 10.12.1.1
+
+    r1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.12.1.1/24 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.12.0.1/30 dev eth2
+        - ip route add 10.12.2.0/24 via 10.12.0.2
+        # ★ 고장: 내가 만드는 frag-needed를 차단 ("보안 정책"이라는 흔한 핑계)
+        - nft add table ip fw
+        - 'nft add chain ip fw output { type filter hook output priority 0 ; }'
+        - 'nft add rule ip fw output icmp type destination-unreachable icmp code frag-needed drop'
+
+    r2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.12.0.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.12.2.1/24 dev eth2
+        - ip route add 10.12.1.0/24 via 10.12.0.1
+
+    h2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.12.2.10/24 dev eth1
+        - ip route add default via 10.12.2.1
+        - 'bash -c "nohup iperf3 -s >/dev/null 2>&1 &"'
+
+  links:
+    - type: veth
+      mtu: 1500
+      endpoints:
+        - node: h1
+          interface: eth1
+        - node: r1
+          interface: eth1
+    - type: veth
+      mtu: 1400                    # ← 저 MTU 구간 (터널/VPN 구간의 모사)
+      endpoints:
+        - node: r1
+          interface: eth2
+        - node: r2
+          interface: eth1
+    - type: veth
+      mtu: 1500
+      endpoints:
+        - node: r2
+          interface: eth2
+        - node: h2
+          interface: eth1

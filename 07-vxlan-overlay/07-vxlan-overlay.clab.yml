@@ -1,0 +1,74 @@
+# 07장 - VXLAN 기초: L2 over L3 실습 토폴로지
+#
+#   vtep1 ────── r1 ────── vtep2          underlay: 10.7.1.0/30 · 10.7.2.0/30 (라우팅됨)
+#     └── vxlan100 ─ ─ ─ ─ ─ ┘            overlay: 192.168.100.0/24 ("같은 L2"처럼)
+#
+# VTEP 사이에 진짜 L3 홉(r1)이 있다 — 그래서 "L2 over L3"가 증명된다.
+# P2P 유니캐스트 VTEP(remote 지정) 사용 (멀티캐스트 BUM 회피, macOS Docker 환경 검증됨).
+#
+# ★ 고장이 기본값: vtep2의 VNI가 200 (vtep1은 100) — "터널 ID 불일치".
+#   → outer(UDP 4789) 패킷은 상대에 도달하지만 decap에서 조용히 소실.
+#   수정(fix.sh): vtep2의 vxlan을 VNI 100으로 재생성 (한 줄 원칙의 예외 — 삭제+생성)
+
+name: 07-vxlan-overlay
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    vtep1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1      # 캡처 노이즈(ND/MLD) 제거
+        - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        - ip link set eth1 up
+        - ip addr add 10.7.1.1/30 dev eth1
+        - ip route add 10.7.2.0/30 via 10.7.1.2
+        - ip link add vxlan100 type vxlan id 100 local 10.7.1.1 remote 10.7.2.1 dstport 4789 dev eth1
+        - ip addr add 192.168.100.1/24 dev vxlan100
+        - ip link set vxlan100 up
+
+    r1:                       # underlay 라우터 — 오버레이의 존재를 모른다
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.7.1.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.7.2.2/30 dev eth2
+
+    vtep2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        - ip link set eth1 up
+        - ip addr add 10.7.2.1/30 dev eth1
+        - ip route add 10.7.1.0/30 via 10.7.2.2
+        - ip link add vxlan100 type vxlan id 200 local 10.7.2.1 remote 10.7.1.1 dstport 4789 dev eth1   # ★ 고장: VNI 200
+        - ip addr add 192.168.100.2/24 dev vxlan100
+        - ip link set vxlan100 up
+
+  links:
+    - type: veth
+      mtu: 1500
+      endpoints:
+        - node: vtep1
+          interface: eth1
+        - node: r1
+          interface: eth1
+    - type: veth
+      mtu: 1500
+      endpoints:
+        - node: r1
+          interface: eth2
+        - node: vtep2
+          interface: eth1

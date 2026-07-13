@@ -1,0 +1,84 @@
+# CP-2 — 블라인드 체크포인트: 상태/NAT 종합 자가 진단 테스트 (08~11장 범위)
+# ⚠️ 학습자: 이 파일을 읽지 마시오! MISSION.md만 보고 진단할 것.
+
+name: cp2
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    cli:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.92.1.10/24 dev eth1
+        - ip route add default via 10.92.1.1
+
+    edge:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.92.1.1/24 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.92.0.1/30 dev eth2
+        - ip link set eth3 up
+        - ip addr add 10.92.4.2/30 dev eth3
+        - ip route add 10.92.2.0/24 via 10.92.0.2
+        # 미끼: 눈에 잘 띄는 방화벽 규칙 — 그러나 8080은 이 장애와 무관하다 (서비스는 443)
+        - nft add table ip edgefw
+        - 'nft add chain ip edgefw forward { type filter hook forward priority 0 ; }'
+        - nft add rule ip edgefw forward tcp dport 8080 drop
+
+    srtr:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.92.0.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.92.2.1/24 dev eth2
+        - ip link set eth3 up
+        - ip addr add 10.92.3.1/30 dev eth3
+        - ip route add 10.92.1.0/24 via 10.92.3.2      # 진짜 원인: 리턴을 nat로
+
+    nat:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.92.3.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.92.4.1/30 dev eth2
+        - ip route add 10.92.1.0/24 via 10.92.4.2
+        - ip route add 10.92.2.0/24 via 10.92.3.1
+        - nft add table ip rewrite
+        - 'nft add chain ip rewrite postfwd { type filter hook forward priority 0 ; }'
+        - 'nft add rule ip rewrite postfwd oifname "eth2" ip saddr 10.92.2.10 ip saddr set 10.92.4.1'
+
+    srv:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.92.2.10/24 dev eth1
+        - ip route add default via 10.92.2.1
+        - 'bash -c "nohup socat TCP-LISTEN:443,fork,reuseaddr SYSTEM:\"echo cp2-ok\" >/dev/null 2>&1 &"'
+
+  links:
+    - endpoints: ["cli:eth1", "edge:eth1"]
+    - endpoints: ["edge:eth2", "srtr:eth1"]
+    - endpoints: ["srtr:eth2", "srv:eth1"]
+    - endpoints: ["srtr:eth3", "nat:eth1"]
+    - endpoints: ["nat:eth2", "edge:eth3"]

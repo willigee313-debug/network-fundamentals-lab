@@ -1,0 +1,64 @@
+# 04장 - L3 라우팅 기본 & 기본 게이트웨이 실습 토폴로지
+#
+#   h1 ──── r1 ──────── r2 ──── h2
+#  10.4.1.10  10.4.0.0/30  10.4.2.10
+#  (10.4.1.0/24)        (10.4.2.0/24)
+#
+# ★ 고장이 기본값: r2에 10.4.1.0/24(클라이언트 대역) 리턴 라우트가 없다.
+#   → h1의 ping은 h2까지 "도달"하지만, h2의 응답이 r2에서 죽는다 (편도만 성립).
+#   수정(한 줄): docker exec clab-04-l3-routing-r2 ip route replace 10.4.1.0/24 via 10.4.0.1
+
+name: 04-l3-routing
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    h1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.4.1.10/24 dev eth1
+        - ip route add default via 10.4.1.1
+
+    r1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.4.1.1/24 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.4.0.1/30 dev eth2
+        - ip route add 10.4.2.0/24 via 10.4.0.2      # r1은 완전: h2 대역으로 가는 길을 안다
+
+    r2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.4.0.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.4.2.1/24 dev eth2
+        # ★ 의도적 고장: 10.4.1.0/24 리턴 라우트 없음 (fix.sh가 고친다)
+
+    h2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.4.2.10/24 dev eth1
+        - ip route add default via 10.4.2.1
+
+  links:
+    - endpoints: ["h1:eth1", "r1:eth1"]
+    - endpoints: ["r1:eth2", "r2:eth1"]
+    - endpoints: ["r2:eth2", "h2:eth1"]

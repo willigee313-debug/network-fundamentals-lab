@@ -1,0 +1,7 @@
+# containerlab 배포 아티팩트 (deploy 시 자동 생성)
+**/clab-*/
+
+# 계획/목표/검증용 작업 문서 — 최종 결과물(README/WALKTHROUGH/*.clab.yml/fix.sh)이 아님
+GOAL.md
+PLAN.md
+VERIFICATION.md

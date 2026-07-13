@@ -1,0 +1,64 @@
+# 01장 - L2 인접성 & ARP 실습 토폴로지
+#
+#   h1 ─┐
+#   h2 ─┼─ sw(브리지=스위치, br0) ─ 모두 같은 브로드캐스트 도메인
+#   h3 ─┘
+#
+# 전부 10.10.10.0/24 로 시작(= "같은 네트워크"). 실습 중에 일부러 고장을 낸다.
+# 노드 접속: docker exec -it clab-01-l2-arp-h1 bash
+#
+# 이 랩은 "같은 L2 세그먼트"만 다루므로 호스트에 기본 게이트웨이(라우터)를 두지 않는다.
+# → 다른 서브넷은 의도적으로 "Network unreachable" 이 되도록(= 라우터 필요, 04장으로 연결).
+# (containerlab이 mgmt망으로 자동 추가하는 default 경로를 제거)
+
+name: 01-l2-arp
+
+# 관리망(각 노드 eth0). 좁은 /24 로, 데이터플레인(10.10.x)·회사 172.0.0.0/12 대역과 겹치지 않게.
+# (Docker Desktop mgmt망은 VM 내부라 Mac 호스트 라우팅엔 영향 없음)
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    sw:                      # 스위치 역할 = 컨테이너 안에 리눅스 브리지(br0)를 만들어 포트들을 묶는다
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - "ip link add name br0 type bridge"
+        - "ip link set br0 up"
+        - "ip link set eth1 up"
+        - "ip link set eth1 master br0"
+        - "ip link set eth2 up"
+        - "ip link set eth2 master br0"
+        - "ip link set eth3 up"
+        - "ip link set eth3 master br0"
+
+    h1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - "ip link set eth1 up"
+        - "ip addr add 10.10.10.1/24 dev eth1"
+        - 'bash -c "ip route del default 2>/dev/null || true"'   # 순수 L2: 라우터 없음
+
+    h2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - "ip link set eth1 up"
+        - "ip addr add 10.10.10.2/24 dev eth1"
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+
+    h3:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - "ip link set eth1 up"
+        - "ip addr add 10.10.10.3/24 dev eth1"
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+
+  links:
+    - endpoints: ["h1:eth1", "sw:eth1"]
+    - endpoints: ["h2:eth1", "sw:eth2"]
+    - endpoints: ["h3:eth1", "sw:eth3"]

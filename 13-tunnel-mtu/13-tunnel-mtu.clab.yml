@@ -1,0 +1,83 @@
+# 13장 - 터널/오버레이 MTU: 숨은 단편화와 그 청구서
+#
+#   vtep1 ──1500── r1 ──[1400]── vtep2        underlay 중간에만 좁은 구간!
+#     └─ vxlan100(자동 mtu 1450) ─ ─ ─ ┘       overlay: 192.168.100.0/24
+#
+# 커널은 "자기 링크의 50B 세금"은 자동 계산한다:
+#   vtep1의 vxlan mtu = 1500-50 = 1450 (1500 강제 설정은 EINVAL로 거부!)
+#   vtep2의 vxlan mtu = 1400-50 = 1350 (협곡이 자기 링크라서 안다)
+# 그러나 vtep1은 "경로 중간"의 협곡(1400)을 모른다 → inner 1450 → outer 1500 > 1400
+# → r1이 outer UDP를 몰래 단편화(outer DF 없음)하는데...
+#
+# ★ 고장이 기본값: vtep2가 조각(non-initial fragment)을 거부한다
+#   (실제 방화벽/일부 경로·호스트의 흔한 성질) → 단편화에 기대던 큰 패킷만 조용히 사망.
+#   수정(한 줄): vtep1의 vxlan100 mtu를 "경로 최솟값" 기준(1400-50=1350)으로.
+
+name: 13-tunnel-mtu
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    vtep1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        - ip link set eth1 up
+        - ip addr add 10.13.1.1/30 dev eth1
+        - ip route add 10.13.2.0/30 via 10.13.1.2
+        - ip link add vxlan100 type vxlan id 100 local 10.13.1.1 remote 10.13.2.1 dstport 4789 dev eth1
+        - ip addr add 192.168.100.1/24 dev vxlan100
+        - ip link set vxlan100 up
+
+    r1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.13.1.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.13.2.2/30 dev eth2
+
+    vtep2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        - ip link set eth1 up
+        - ip addr add 10.13.2.1/30 dev eth1
+        - ip route add 10.13.1.0/30 via 10.13.2.2
+        - ip link add vxlan100 type vxlan id 100 local 10.13.2.1 remote 10.13.1.1 dstport 4789 dev eth1
+        - ip addr add 192.168.100.2/24 dev vxlan100
+        - ip link set vxlan100 up
+        # ★ 고장의 나머지 절반: 조각(non-initial fragment) 거부 — 실무 방화벽/일부 경로의 흔한 성질.
+        #   defrag(-400)보다 앞(-450)에 걸어야 재조립 전의 날조각을 잡는다. (와이어 쪽 eth1만)
+        - nft add table ip fw
+        - 'nft add chain ip fw predefrag { type filter hook prerouting priority -450 ; }'
+        - 'nft add rule ip fw predefrag iifname "eth1" ip frag-off & 0x1fff != 0 drop'
+        - 'bash -c "nohup iperf3 -s >/dev/null 2>&1 &"'
+
+  links:
+    - type: veth
+      mtu: 1500
+      endpoints:
+        - node: vtep1
+          interface: eth1
+        - node: r1
+          interface: eth1
+    - type: veth
+      mtu: 1400                     # ← 경로 "중간"의 협곡 (VTEP들은 모른다)
+      endpoints:
+        - node: r1
+          interface: eth2
+        - node: vtep2
+          interface: eth1

@@ -1,0 +1,97 @@
+# 11장 - 대칭성 & 상태(stateful) + NAT의 소스 재작성
+#
+#   cli(10.11.1.10) ── edge ─────── srtr ── srv(10.11.2.10:443)
+#                        \          /
+#                         \        /
+#                          ─ nat ─           # 삼각형: nat은 srtr·edge 양쪽에 연결
+#
+#   전송망: edge↔srtr 10.11.0.0/30 · srtr↔nat 10.11.3.0/30 · nat↔edge 10.11.4.0/30
+#
+# ★ 고장이 기본값: srtr가 "클라 대역(10.11.1.0/24)을 nat로" 라우팅한다.
+#   → 포워드(cli→srv)는 정상, 리턴(srv→cli)만 nat 경유 → nat이 소스를 재작성 →
+#   → cli는 "내가 접속한 적 없는 IP(10.11.4.1)"에서 SYN-ACK를 받고 버린다 → 타임아웃.
+#   수정(한 줄): docker exec clab-11-symmetry-nat-srtr ip route replace 10.11.1.0/24 via 10.11.0.1
+#
+# NAT 구현 노트 (M0 P8 실측): 리눅스 conntrack NAT(masquerade)는 "SYN 없이 온
+# SYN-ACK"를 INVALID로 보고 NAT하지 않는다 → 이 장애가 재현되지 않음.
+# 실제 장애에서 관찰된 "모든 리턴 패킷 재작성"은 nft stateless 재작성으로 모사한다.
+# (masquerade로 바꾸면 무슨 일이 나는지는 실습 F — 그 자체로 교훈)
+
+name: 11-symmetry-nat
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    cli:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.11.1.10/24 dev eth1
+        - ip route add default via 10.11.1.1
+
+    edge:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.11.1.1/24 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.11.0.1/30 dev eth2
+        - ip link set eth3 up
+        - ip addr add 10.11.4.2/30 dev eth3
+        - ip route add 10.11.2.0/24 via 10.11.0.2
+
+    srtr:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.11.0.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.11.2.1/24 dev eth2
+        - ip link set eth3 up
+        - ip addr add 10.11.3.1/30 dev eth3
+        - ip route add 10.11.1.0/24 via 10.11.3.2   # ★ 고장: 클라 대역 리턴을 nat로
+
+    nat:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.11.3.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.11.4.1/30 dev eth2
+        - ip route add 10.11.1.0/24 via 10.11.4.2   # 클라 대역은 edge로 (독자 경로)
+        - ip route add 10.11.2.0/24 via 10.11.3.1   # 서버 대역은 srtr로
+        # 소스 재작성 (stateless — 지나가는 모든 srv발 패킷의 소스를 nat IP로)
+        - nft add table ip rewrite
+        - 'nft add chain ip rewrite postfwd { type filter hook forward priority 0 ; }'
+        - 'nft add rule ip rewrite postfwd oifname "eth2" ip saddr 10.11.2.10 ip saddr set 10.11.4.1'
+
+    srv:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.11.2.10/24 dev eth1
+        - ip route add default via 10.11.2.1
+        - 'bash -c "nohup socat TCP-LISTEN:443,fork,reuseaddr SYSTEM:\"echo pong\" >/dev/null 2>&1 &"'
+
+  links:
+    - endpoints: ["cli:eth1", "edge:eth1"]
+    - endpoints: ["edge:eth2", "srtr:eth1"]
+    - endpoints: ["srtr:eth2", "srv:eth1"]
+    - endpoints: ["srtr:eth3", "nat:eth1"]
+    - endpoints: ["nat:eth2", "edge:eth3"]

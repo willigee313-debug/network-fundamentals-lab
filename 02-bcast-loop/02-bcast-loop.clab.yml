@@ -1,0 +1,74 @@
+# 02장 - 브로드캐스트 도메인 & L2 루프 (+MAC 학습/CAM) 실습 토폴로지
+#
+#   h1 ── sw1 ══ sw2 ── h2        # sw1↔sw2 링크가 2개 (eth2, eth3)
+#                                 # eth3은 배포 시 down → 실습 B에서 up = 루프 완성(스톰)
+#   전부 10.2.0.0/24
+#
+# ⚠️ 루프를 "장전 상태"로 배포하지 않는 이유: 루프가 살아있으면 어떤 브로드캐스트든
+#    (실습 A의 첫 ping 포함) 즉시 스톰을 점화한다. 고장 주입은 실습 B에서 한 줄로.
+# ⚠️ IPv6를 전 노드에서 끈다: 꺼두지 않으면 커널의 IPv6 노이즈(MLD/RS)가
+#    루프를 올리는 순간 사용자 행동 없이도 스톰을 자연 점화한다. (M0 실측)
+
+name: 02-bcast-loop
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    sw1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        - ip link add br0 type bridge
+        - ip link set br0 up
+        - ip link set eth1 up
+        - ip link set eth1 master br0
+        - ip link set eth2 up
+        - ip link set eth2 master br0
+        - ip link set eth3 master br0
+        - ip link set eth3 down          # ← 실습 B에서 up = 루프 완성
+
+    sw2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        - ip link add br0 type bridge
+        - ip link set br0 up
+        - ip link set eth1 up
+        - ip link set eth1 master br0
+        - ip link set eth2 up
+        - ip link set eth2 master br0
+        - ip link set eth3 up
+        - ip link set eth3 master br0    # sw1쪽이 down이라 링크는 아직 죽어 있음
+
+    h1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - ip link set eth1 up
+        - ip addr add 10.2.0.1/24 dev eth1
+
+    h2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - ip link set eth1 up
+        - ip addr add 10.2.0.2/24 dev eth1
+
+  links:
+    - endpoints: ["h1:eth1", "sw1:eth1"]
+    - endpoints: ["h2:eth1", "sw2:eth1"]
+    - endpoints: ["sw1:eth2", "sw2:eth2"]
+    - endpoints: ["sw1:eth3", "sw2:eth3"]   # 루프용 두 번째 링크 (배포 시 sw1쪽 down)

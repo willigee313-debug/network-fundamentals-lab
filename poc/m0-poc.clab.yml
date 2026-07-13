@@ -1,0 +1,178 @@
+# M0 PoC — PLAN.md §1 체크리스트 검증용 "버리는" 토폴로지
+#
+# 한 번의 deploy로 아래를 검증한다:
+#   P1: VXLAN (vtep1 ─ r1 ─ vtep2, routed underlay 위 L2 오버레이)
+#   P2: 브리지 vlan_filtering (swa)
+#   P3: 브리지 STP — BPDU/blocking (swa == swb 이중 링크)
+#   P4: per-netns nf_conntrack sysctl (nat 노드에서)
+#   P5: clab links의 mtu: 파라미터 반영 (vtep1-r1 링크 = 1400)
+#   P8: 리턴 경유 masquerade가 SYN-ACK에 적용되는지 (11장 모형: cli/edge/srtr/nat/srv 삼각형)
+#       ⚠️ 이 토포의 nat은 "masquerade"(P8 검증 원형)다 — 11장 랩의 nft stateless와 다르므로
+#          11장 의미의 재현 판정은 11-symmetry-nat 랩으로 할 것. (EC2 검증 시 혼동 사례 있음)
+#
+# P6(FRR arm64), P7(netshoot 도구 목록)은 별도 docker run으로 확인.
+
+name: m0-poc
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    # ───────── P1/P5: VXLAN over routed underlay ─────────
+    vtep1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.7.1.1/30 dev eth1
+        - ip route add 10.7.2.0/30 via 10.7.1.2
+        - ip link add vxlan100 type vxlan id 100 local 10.7.1.1 remote 10.7.2.1 dstport 4789 dev eth1
+        - ip addr add 192.168.100.1/24 dev vxlan100
+        - ip link set vxlan100 up
+
+    r1:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.7.1.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.7.2.2/30 dev eth2
+
+    vtep2:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.7.2.1/30 dev eth1
+        - ip route add 10.7.1.0/30 via 10.7.2.2
+        - ip link add vxlan100 type vxlan id 100 local 10.7.2.1 remote 10.7.1.1 dstport 4789 dev eth1
+        - ip addr add 192.168.100.2/24 dev vxlan100
+        - ip link set vxlan100 up
+
+    # ───────── P2/P3: 브리지 vlan_filtering + STP ─────────
+    # 주의: 이중 링크 = 루프. IPv6 노이즈(MLD/RS)가 스톰을 자연 점화할 수 있으므로
+    #       ① IPv6 침묵 ② 포트 편입 "전에" STP를 켠다 (수렴 중 포트는 non-forwarding → 스톰 없음)
+    swa:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        - ip link add br0 type bridge
+        - ip link set br0 type bridge stp_state 1
+        - ip link set br0 up
+        - ip link set eth1 up
+        - ip link set eth1 master br0
+        - ip link set eth2 up
+        - ip link set eth2 master br0
+        - ip link set br0 type bridge vlan_filtering 1
+        - bridge vlan add dev eth1 vid 10
+
+    swb:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        - ip link add br0 type bridge
+        - ip link set br0 type bridge stp_state 1
+        - ip link set br0 up
+        - ip link set eth1 up
+        - ip link set eth1 master br0
+        - ip link set eth2 up
+        - ip link set eth2 master br0
+
+    # ───────── P8: 11장 모형 (edge-srtr-nat 삼각형) ─────────
+    #   cli ── edge ── srtr ── srv
+    #            \      /
+    #             \    /
+    #              nat          # srtr의 클라 대역 라우트가 nat를 가리키면(고장)
+    #                           # 리턴 SYN-ACK가 nat에서 masquerade → cli가 drop
+    cli:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.11.1.10/24 dev eth1
+        - ip route add default via 10.11.1.1
+
+    edge:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.11.1.1/24 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.11.0.1/30 dev eth2
+        - ip link set eth3 up
+        - ip addr add 10.11.4.2/30 dev eth3
+        - ip route add 10.11.2.0/24 via 10.11.0.2
+
+    srtr:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.11.0.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.11.2.1/24 dev eth2
+        - ip link set eth3 up
+        - ip addr add 10.11.3.1/30 dev eth3
+        - ip route add 10.11.1.0/24 via 10.11.3.2   # ← 고장 기본값: 클라 대역을 nat로
+
+    nat:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.11.3.2/30 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.11.4.1/30 dev eth2
+        - ip route add 10.11.1.0/24 via 10.11.4.2   # 클라 대역은 edge로 (nat의 독자 경로)
+        - ip route add 10.11.2.0/24 via 10.11.3.1   # 서버 대역은 srtr로 (rp_filter 대비)
+        - iptables -t nat -A POSTROUTING -o eth2 -j MASQUERADE
+
+    srv:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.11.2.10/24 dev eth1
+        - ip route add default via 10.11.2.1
+
+  links:
+    # P1/P5: underlay (vtep1-r1 링크에 mtu 명시 → P5 검증)
+    - type: veth
+      mtu: 1400
+      endpoints:
+        - node: vtep1
+          interface: eth1
+        - node: r1
+          interface: eth1
+    - endpoints: ["r1:eth2", "vtep2:eth1"]
+    # P2/P3: 브리지 이중 링크(루프)
+    - endpoints: ["swa:eth1", "swb:eth1"]
+    - endpoints: ["swa:eth2", "swb:eth2"]
+    # P8: 삼각형
+    - endpoints: ["cli:eth1", "edge:eth1"]
+    - endpoints: ["edge:eth2", "srtr:eth1"]
+    - endpoints: ["srtr:eth2", "srv:eth1"]
+    - endpoints: ["srtr:eth3", "nat:eth1"]
+    - endpoints: ["nat:eth2", "edge:eth3"]

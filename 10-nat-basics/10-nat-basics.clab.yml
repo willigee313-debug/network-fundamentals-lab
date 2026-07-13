@@ -1,0 +1,72 @@
+# 10장 - NAT 기본 (SNAT/DNAT, 소스 재작성) 실습 토폴로지
+#
+#            (사설망)          ("인터넷")
+#   cli ──────── nat ──────── srv(:80)     ← 실습 A: SNAT — 사설→인터넷은 소스를 빌려야 한다
+#  10.10.1.10     │ eth2      10.10.2.10
+#                 │ eth3
+#                ext ─ 10.10.3.20           ← 실습 B: DNAT — 포트 공개 (ext → nat:8080 → cli:80)
+#
+# ★ 고장이 기본값 (실습 A): nat에 MASQUERADE가 없다.
+#   srv에는 "unreachable 10.10.1.0/24"를 심어 인터넷의 현실을 모사한다:
+#   인터넷 라우터는 사설(RFC1918) 대역으로 돌아오는 경로를 모른다/버린다.
+#   → cli의 SYN은 srv에 "도달"하지만(라우팅은 됨) srv가 응답할 길이 없다 → 타임아웃.
+#   수정(한 줄): docker exec clab-10-nat-basics-nat iptables -t nat -A POSTROUTING -o eth2 -j MASQUERADE
+
+name: 10-nat-basics
+
+mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 10.99.99.0/24
+
+topology:
+  nodes:
+    cli:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.10.1.10/24 dev eth1
+        - ip route add default via 10.10.1.1
+        - 'bash -c "nohup socat TCP-LISTEN:80,fork,reuseaddr SYSTEM:\"echo pong-from-cli\" >/dev/null 2>&1 &"'   # 실습 B에서 공개될 서비스
+
+    nat:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip link set eth1 up
+        - ip addr add 10.10.1.1/24 dev eth1
+        - ip link set eth2 up
+        - ip addr add 10.10.2.1/24 dev eth2
+        - ip link set eth3 up
+        - ip addr add 10.10.3.1/24 dev eth3
+        # ★ 실습 A용 고장: MASQUERADE 없음! (fix.sh가 추가한다)
+        # 실습 B용 DNAT(포트 공개)는 미리 장전: ext → nat:8080 → cli:80
+        - iptables -t nat -A PREROUTING -i eth3 -p tcp --dport 8080 -j DNAT --to-destination 10.10.1.10:80
+
+    srv:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.10.2.10/24 dev eth1
+        - ip route add default via 10.10.2.1
+        - ip route add unreachable 10.10.1.0/24     # "인터넷은 사설 대역을 모른다" 모사
+        - 'bash -c "nohup socat TCP-LISTEN:80,fork,reuseaddr SYSTEM:\"echo pong-from-srv\" >/dev/null 2>&1 &"'
+
+    ext:
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - 'bash -c "ip route del default 2>/dev/null || true"'
+        - ip link set eth1 up
+        - ip addr add 10.10.3.20/24 dev eth1
+        - ip route add default via 10.10.3.1
+
+  links:
+    - endpoints: ["cli:eth1", "nat:eth1"]
+    - endpoints: ["nat:eth2", "srv:eth1"]
+    - endpoints: ["nat:eth3", "ext:eth1"]
